@@ -8,6 +8,7 @@ help:
 	@echo "Available commands:"
 	@echo "  make install  - Create venv and install dependencies"
 	@echo "  make index    - Run the ingestion/indexing pipeline"
+	@echo "  make ingest   - Extract and process raw DOCX files to JSONL"
 	@echo "  make serve    - Start the FastAPI web service"
 	@echo "  make test     - Run unit tests with pytest"
 	@echo "  make clean    - Remove virtual environment and temporary files"
@@ -19,6 +20,9 @@ install:
 
 index:
 	$(PYTHON) scripts/build_index.py
+
+ingest:
+	$(PYTHON) scripts/ingest_docs.py
 
 serve:
 	$(PYTHON) -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
