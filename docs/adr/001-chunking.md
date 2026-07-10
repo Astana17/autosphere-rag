@@ -6,35 +6,50 @@
 
 ## Context
 
-Our RAG system is designed to answer employee questions grounded in highly structured legal texts (e.g., the Kazakh Labor Code). 
-Legal texts have specific, well-defined article boundaries (e.g., "Статья 52. Основания для расторжения трудового договора по инициативе работодателя"). 
+Our RAG system answers employee questions grounded in structured Kazakh legal texts
+(road traffic law/rules, administrative offences code, compulsory motor insurance law).
 
-Retrieving text chunks split at arbitrary lengths (e.g. 500 characters) can cut articles mid-sentence or mid-list item. This leads to two major issues:
-1. Missing context (e.g., retrieval returns the grounds for termination but misses the crucial subsection numbering).
-2. Grounding references are degraded since chunk boundaries do not align with official article numbers, complicating legal citations.
+These documents have clear semantic units: `Статья N` for laws/codes and `Пункт N` for
+traffic rules. Arbitrary fixed-length splits cut mid-article, which hurts retrieval and
+makes citations unreliable.
 
-We need a chunking strategy that maximizes retrieval quality (`recall@5`) and ensures generated citations are exact and complete.
+Step 3 already persists article/point records in `data/processed/*.jsonl`. Chunking must
+reuse those boundaries rather than re-parsing DOCX with fragile regex.
 
 ## Options Considered
 
 ### Option 1: Naive Fixed-Size Recursive Character Splitter
-Using `RecursiveCharacterTextSplitter` with a chunk size of 500-800 characters and a small overlap (e.g. 50-100 characters).
-- **Pros:** Domain-agnostic, very easy to implement, guarantees uniform embedding size.
-- **Cons:** Splits articles midway; creates redundant overlap chunks; leads to lower retrieval precision because text chunks contain parts of two unrelated articles.
+`RecursiveCharacterTextSplitter` over each full document (concatenated processed records),
+chunk size 200–1600 with overlap.
+- **Pros:** Required RAID baseline; domain-agnostic; easy size ablation.
+- **Cons:** Cuts articles mid-list; mixes unrelated articles in one chunk; weaker citations.
 
-### Option 2: Custom Article-Boundary (Section-Aware) Splitter
-Parsing the raw document using regular expressions to detect article patterns (e.g. `^Статья \d+`) and splitting the corpus exactly at these boundaries.
-- **Pros:** Respects semantic units (each article is parsed as a single chunk); preserves numbered lists completely; maps `chunk_id` directly to article references (e.g., `Статья 52`), ensuring exact citations.
-- **Cons:** Chunks have variable lengths; large articles (e.g., containing 3000+ characters) could exceed context window tokens or degrade embedding similarity scores.
+### Option 2: Article/Point-Aware Splitter (with size cap)
+One chunk per ingested `Статья` / `Пункт`. Units longer than 1,500 characters are
+sub-split with the recursive splitter while retaining `parent_article_id` and a header
+prefix on every part.
+- **Pros:** Aligns with legal units and ground-truth labels; preserves citations; works for
+  both `Статья` and `Пункт` via ingest metadata.
+- **Cons:** Variable chunk lengths; oversized articles still need a secondary split.
 
 ## Decision
 
-We decided to implement the **Custom Article-Boundary (Section-Aware) Splitter (Option 2)**. 
+Implement **both** strategies (RAID requirement):
 
-To address the risk of large articles, any article exceeding 1,500 characters is sub-split using a recursive splitter, while keeping metadata tracking back to the parent Article ID.
+| Output | Strategy | Role |
+|--------|----------|------|
+| `data/chunks_recursive.jsonl` | Option 1 | Baseline + chunk-size ablation |
+| `data/chunks_article.jsonl` | Option 2 | Primary retrieval index |
+| `data/chunks.jsonl` | Option 2 (default copy) | Used by `scripts/build_index.py` |
+
+Code lives in `app/chunking.py`; CLI entrypoint is `make chunk` / `scripts/chunk_docs.py`.
 
 ## Consequences
 
-- **Retrieval Quality:** Initial testing on the ground-truth set showed a significant increase in `recall@5` (from 0.73 to 0.87) because the retriever returns complete articles containing the entire context.
-- **Citation Accuracy:** The LLM receives clear section headers in context, allowing it to generate source citations referencing exact Article numbers.
-- **Complexity:** The ingestion script requires regular expression parsing, which requires maintenance if the document format changes significantly.
+- Default index uses article-aware chunks, so ground-truth can key off `article_id`.
+- Large articles (definitions, long offence lists) become `_p0`, `_p1`, … parts without
+  losing parent metadata.
+- Ablation compares recursive sizes `{200,400,800,1600}` against article-aware on the
+  same 15-question set; expect article-aware to win on recall and citation quality.
+- Ingest format changes (new heading styles) are handled in `scripts/ingest_docs.py`, not
+  in the chunker.
