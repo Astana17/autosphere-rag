@@ -1,0 +1,15 @@
+{"question": "Каков минимальный размер отпускных согласно Трудовому кодексу?", "expected_chunk_ids": ["sample.txt_sec_1"], "expected_section": "Статья 103"}
+{"question": "В каких случаях работодатель может расторгнуть трудовой договор в одностороннем порядке?", "expected_chunk_ids": ["sample.txt_sec_2"], "expected_section": "Статья 52"}
+{"question": "Какова нормальная продолжительность рабочего времени в неделю?", "expected_chunk_ids": ["sample.txt_sec_3"], "expected_section": "Статья 68"}
+{"question": "Предусмотрены ли сверхурочные работы без согласия работника?", "expected_chunk_ids": ["sample.txt_sec_4"], "expected_section": "Статья 77"}
+{"question": "Каков порядок компенсации за неиспользованные дни отпуска при увольнении?", "expected_chunk_ids": ["sample.txt_sec_5"], "expected_section": "Статья 96"}
+{"question": "Как регулируются трудовые отношения при банкротстве работодателя?", "expected_chunk_ids": ["sample.txt_sec_6"], "expected_section": "Статья 113"}
+{"question": "Каков испытательный срок при приеме на работу?", "expected_chunk_ids": ["sample.txt_sec_7"], "expected_section": "Статья 36"}
+{"question": "Предоставляется ли отпуск по беременности и родам?", "expected_chunk_ids": ["sample.txt_sec_8"], "expected_section": "Статья 99"}
+{"question": "Каков размер компенсации за работу в праздничные и выходные дни?", "expected_chunk_ids": ["sample.txt_sec_9"], "expected_section": "Статья 109"}
+{"question": "Каков порядок применения дисциплинарных взысканий к сотруднику?", "expected_chunk_ids": ["sample.txt_sec_10"], "expected_section": "Статья 72"}
+{"question": "Ограничена ли материальная ответственность работника перед работодателем?", "expected_chunk_ids": ["sample.txt_sec_11"], "expected_section": "Статья 120"}
+{"question": "Каковы права работающих женщин с детьми до полутора лет?", "expected_chunk_ids": ["sample.txt_sec_12"], "expected_section": "Статья 82"}
+{"question": "В какой срок выплачивается заработная плата?", "expected_chunk_ids": ["sample.txt_sec_13"], "expected_section": "Статья 113"}
+{"question": "Можно ли отозвать работника из оплачиваемого ежегодного трудового отпуска?", "expected_chunk_ids": ["sample.txt_sec_14"], "expected_section": "Статья 95"}
+{"question": "Каков размер социального пособия по временной нетрудоспособности?", "expected_chunk_ids": ["sample.txt_sec_15"], "expected_section": "Статья 133"}
