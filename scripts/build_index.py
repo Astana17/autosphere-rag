@@ -7,7 +7,7 @@ import numpy as np
 import re
 from zipfile import ZipFile
 from xml.etree import ElementTree as ET
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 # Load environment variables
 from dotenv import load_dotenv
@@ -146,6 +146,60 @@ def chunk_documents_recursive(documents: List[Dict[str, Any]], chunk_size: int =
             })
     return chunks
 
+# Matches the start of a defined-term entry in a glossary-style section, e.g.
+# "27) дорожное движение - совокупность общественных отношений..." or
+# "13) дорожное движение – совокупность...". Both ПДД (Пункт 2) and the road traffic
+# law (Статья 1) list dozens of unrelated defined terms as "N) термин - определение;"
+# in one continuous block of text.
+GLOSSARY_ENTRY_PATTERN = re.compile(r'^(?P<num>\d+(?:-\d+)?)\)\s*(?P<term>[^\n]*?)\s*[–-]\s', re.MULTILINE)
+GLOSSARY_MIN_ENTRIES = 5  # below this, it's more likely an ordinary numbered list than a glossary
+# Guards against false positives: an ordinary article can also enumerate "N) ..." items
+# (e.g. Статья 73 lists licence subcategories "D1E", "CE1", ...) without being a glossary
+# of unrelated terms. Only the two sections that open with this defining phrase actually
+# are one — matching on it avoids exploding unrelated enumerated lists into "terms".
+GLOSSARY_INTRO_PATTERN = re.compile(r'используются следующие основные понятия', re.IGNORECASE)
+
+
+def split_glossary_by_term(section: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+    """
+    If a section is a glossary (opens with "...используются следующие основные понятия:"
+    followed by many "N) term - definition;" entries), split it into one chunk per defined
+    term instead of chopping it at an arbitrary character offset. A query about one specific
+    term (e.g. "уступить дорогу") then retrieves a small, precise chunk instead of competing
+    against ~a dozen sibling chunks that each pack 15-20 unrelated definitions together.
+    Returns None if the section doesn't look like a glossary, so the caller falls back to
+    length-based splitting.
+    """
+    text = section["text"]
+    if not GLOSSARY_INTRO_PATTERN.search(text):
+        return None
+
+    matches = list(GLOSSARY_ENTRY_PATTERN.finditer(text))
+    if len(matches) < GLOSSARY_MIN_ENTRIES:
+        return None
+
+    chunks = []
+    base_start = section.get("char_start") or 0
+    for i, match in enumerate(matches):
+        start = match.start()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        entry_text = text[start:end].strip()
+        if not entry_text:
+            continue
+        term = match.group("term").strip()
+        chunk = dict(section)
+        chunk["chunk_id"] = f"{section['chunk_id']}_term_{i}"
+        chunk["text"] = entry_text
+        chunk["section_title"] = f"{section.get('section_title', '')} — {term}"[:160]
+        chunk["char_start"] = base_start + start
+        chunk["char_end"] = base_start + end
+        # A term entry is normally short, but the last one absorbs everything up to the
+        # section end -- if the glossary list doesn't cleanly end the section, cap it like
+        # any other long chunk instead of letting it balloon unbounded.
+        chunks.extend(split_long_section(chunk))
+    return chunks
+
+
 def split_long_section(section: Dict[str, Any], chunk_size: int = 1600, overlap: int = 150) -> List[Dict[str, Any]]:
     text = section["text"]
     if len(text) <= chunk_size:
@@ -176,10 +230,16 @@ def chunk_documents_by_article(documents: List[Dict[str, Any]]) -> List[Dict[str
     Highly optimized for legal texts (Kazakh Labor Code / Tax Code).
     """
     chunks = []
-    section_pattern = re.compile(
-        r'^(?P<title>(?:РАЗДЕЛ\s+\d+\.?.*|Глава\s+\d+\.?.*|Статья\s+\d+(?:-\d+)?\.?.*|\d+\.\s+.*))$',
+    # Structural headers (РАЗДЕЛ/Глава/Статья) always start a new section, regardless
+    # of document type. Bare numbered items ("73. ...") only start a new section when
+    # they are top-level clauses (e.g. the ПДД itself, which has no "Статья" wrapper) -
+    # inside a "Статья N" block they are sub-clauses of that article and must stay merged,
+    # otherwise every numbered sentence of a KoAP/law article gets split into its own chunk.
+    header_pattern = re.compile(
+        r'^(?P<title>(?:РАЗДЕЛ\s+\d+\.?.*|Глава\s+\d+\.?.*|Статья\s+\d+(?:-\d+)?\.?.*))$',
         re.IGNORECASE
     )
+    bare_item_pattern = re.compile(r'^(?P<title>\d+\.\s+.*)$')
 
     for doc in documents:
         text = clean_and_normalize(doc["text"])
@@ -204,12 +264,17 @@ def chunk_documents_by_article(documents: List[Dict[str, Any]]) -> List[Dict[str
                 "char_end": current_start + len(section_text),
                 "document_version": PREPROCESSING_VERSION
             }
-            chunks.extend(split_long_section(base_chunk))
+            glossary_chunks = split_glossary_by_term(base_chunk)
+            chunks.extend(glossary_chunks if glossary_chunks is not None else split_long_section(base_chunk))
             section_idx += 1
 
         for line in lines:
             stripped = line.strip()
-            match = section_pattern.match(stripped)
+            inside_article = current_title.lower().startswith("статья")
+            match = header_pattern.match(stripped)
+            if not match and not inside_article:
+                match = bare_item_pattern.match(stripped)
+
             if match and current_lines:
                 flush_section()
                 current_lines = [stripped]

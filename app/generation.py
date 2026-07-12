@@ -46,6 +46,21 @@ def extract_llm_content(response_data: dict) -> str:
         return response_data["message"]["content"]
     raise KeyError("choices/message")
 
+def strip_json_fence(content: str) -> str:
+    """
+    Some providers ignore the "no markdown" instruction and wrap JSON in a
+    ```json ... ``` fence. Strip it so json.loads doesn't choke on the backticks.
+    """
+    text = content.strip()
+    if text.startswith("```"):
+        text = text[3:]
+        if text.lower().startswith("json"):
+            text = text[4:]
+        if text.endswith("```"):
+            text = text[:-3]
+        text = text.strip()
+    return text
+
 def chat_completions_url(base_url: str) -> str:
     normalized_url = base_url.rstrip("/")
     if normalized_url.endswith("/chat/completions"):
@@ -166,7 +181,7 @@ async def answer(question: str, retrieved_chunks: List[Chunk]) -> AnswerResponse
             raise ValueError(f"Unsupported LLM provider: {provider}")
 
         # Parse output JSON
-        data = json.loads(content.strip())
+        data = json.loads(strip_json_fence(content))
 
         # Convert sources dict list to SourceReference schema objects
         sources_list = []
