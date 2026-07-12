@@ -7,6 +7,8 @@ from app.observability import logger
 
 PROMPT_VERSION = "rag_v1"
 
+REFUSAL_ANSWER = "I don't know from the provided context"
+
 SYSTEM_PROMPT = """You are a highly precise, fact-grounded Q&A assistant.
 Your task is to answer the user's question ONLY using the provided text contexts.
 
@@ -29,26 +31,53 @@ Constraints:
 4. Do not include any preambles, markdown formatting (like ```json), or explanations outside of the JSON. Return only the raw JSON.
 """
 
+
 def build_user_prompt(question: str, retrieved_chunks: List[Chunk]) -> str:
     contexts_str = ""
     for idx, chunk in enumerate(retrieved_chunks):
-        contexts_str += f"--- CONTEXT {idx+1} (ID: {chunk.chunk_id}, File: {chunk.source_file}, Page: {chunk.page}, Section: {chunk.section_title}) ---\n"
+        contexts_str += (
+            f"--- CONTEXT {idx + 1} (ID: {chunk.chunk_id}, File: {chunk.source_file}, "
+            f"Page: {chunk.page}, Section: {chunk.section_title}) ---\n"
+        )
         contexts_str += f"{chunk.text}\n\n"
-        
+
     return f"Contexts:\n{contexts_str}\nQuestion: {question}"
+
+
+def _parse_llm_json(content: str) -> AnswerResponse:
+    data = json.loads(content.strip())
+    sources_list = []
+    for src in data.get("sources", []):
+        sources_list.append(
+            SourceReference(
+                source_file=src.get("source_file", "unknown"),
+                page=src.get("page"),
+                section_title=src.get("section_title"),
+                chunk_id=src.get("chunk_id"),
+            )
+        )
+    return AnswerResponse(
+        answer=data.get("answer", REFUSAL_ANSWER),
+        sources=sources_list,
+        confidence=float(data.get("confidence", 0.0)),
+        used_context=bool(data.get("used_context", False)),
+        degraded=False,
+    )
+
 
 async def answer(question: str, retrieved_chunks: List[Chunk]) -> AnswerResponse:
     """
     Generates an answer grounded in the retrieved chunks.
-    Connects to the configured provider (Ollama or OpenAI) or falls back to mock responses.
+    Transient HTTP/transport errors are re-raised so callers can retry.
+    Malformed LLM JSON falls back to a structured refusal (non-retryable).
     """
     provider = os.getenv("LLM_PROVIDER", "ollama").lower()
     model_name = os.getenv("LLM_MODEL_NAME", "llama3.2:3b")
     base_url = os.getenv("LLM_BASE_URL", "http://localhost:11434")
     api_key = os.getenv("LLM_API_KEY", "")
-    
+
     user_content = build_user_prompt(question, retrieved_chunks)
-    
+
     logger.info(
         f"Invoking LLM provider: {provider} (model: {model_name})",
         extra={
@@ -56,101 +85,73 @@ async def answer(question: str, retrieved_chunks: List[Chunk]) -> AnswerResponse
                 "prompt_version": PROMPT_VERSION,
                 "model_name": model_name,
                 "provider": provider,
-                "retrieved_chunk_ids": [c.chunk_id for c in retrieved_chunks]
+                "retrieved_chunk_ids": [c.chunk_id for c in retrieved_chunks],
             }
-        }
+        },
     )
 
-    # If no chunks are retrieved, immediately return refusal
     if not retrieved_chunks:
         return AnswerResponse(
-            answer="I don't know from the provided context",
+            answer=REFUSAL_ANSWER,
             sources=[],
             confidence=0.0,
-            used_context=False
+            used_context=False,
+            degraded=False,
         )
 
-    # Implementation for Ollama or OpenAI
+    # OpenAI-compatible gateways (OpenAI, Alem+, etc.)
+    if provider in {"openai", "alemplus", "alem"}:
+        url = f"{base_url.rstrip('/')}/chat/completions"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        }
+        payload = {
+            "model": model_name,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
+            ],
+            "temperature": 0.0,
+            "response_format": {"type": "json_object"},
+        }
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, headers=headers, json=payload, timeout=30.0)
+            response.raise_for_status()
+            res_data = response.json()
+            content = res_data["choices"][0]["message"]["content"]
+
+    elif provider == "ollama":
+        url = f"{base_url.rstrip('/')}/api/chat"
+        payload = {
+            "model": model_name,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
+            ],
+            "stream": False,
+            "options": {"temperature": 0.0},
+            "format": "json",
+        }
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, json=payload, timeout=30.0)
+            response.raise_for_status()
+            res_data = response.json()
+            content = res_data["message"]["content"]
+    else:
+        raise ValueError(f"Unsupported LLM provider: {provider}")
+
     try:
-        if provider == "openai":
-            # Call OpenAI Chat Completions API
-            url = f"{base_url.rstrip('/')}/chat/completions"
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}"
-            }
-            payload = {
-                "model": model_name,
-                "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_content}
-                ],
-                "temperature": 0.0,
-                "response_format": {"type": "json_object"}
-            }
-            
-            async with httpx.AsyncClient() as client:
-                response = await client.post(url, headers=headers, json=payload, timeout=30.0)
-                response.raise_for_status()
-                res_data = response.json()
-                content = res_data["choices"][0]["message"]["content"]
-                
-        elif provider == "ollama":
-            # Call Ollama API
-            url = f"{base_url.rstrip('/')}/api/chat"
-            payload = {
-                "model": model_name,
-                "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_content}
-                ],
-                "stream": False,
-                "options": {
-                    "temperature": 0.0
-                },
-                "format": "json"
-            }
-            
-            async with httpx.AsyncClient() as client:
-                response = await client.post(url, json=payload, timeout=30.0)
-                response.raise_for_status()
-                res_data = response.json()
-                content = res_data["message"]["content"]
-                
-        else:
-            raise ValueError(f"Unsupported LLM provider: {provider}")
-
-        # Parse output JSON
-        data = json.loads(content.strip())
-        
-        # Convert sources dict list to SourceReference schema objects
-        sources_list = []
-        for src in data.get("sources", []):
-            sources_list.append(
-                SourceReference(
-                    source_file=src.get("source_file", "unknown"),
-                    page=src.get("page"),
-                    section_title=src.get("section_title"),
-                    chunk_id=src.get("chunk_id")
-                )
-            )
-            
-        return AnswerResponse(
-            answer=data.get("answer", "I don't know from the provided context"),
-            sources=sources_list,
-            confidence=float(data.get("confidence", 0.0)),
-            used_context=bool(data.get("used_context", False))
-        )
-
-    except Exception as e:
+        return _parse_llm_json(content)
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
         logger.error(
-            f"LLM generation failed: {str(e)}. Falling back to default response.",
-            extra={"extra_info": {"error": str(e)}}
+            f"LLM returned malformed JSON: {str(e)}",
+            extra={"extra_info": {"error": str(e), "raw_preview": str(content)[:200]}},
         )
-        # Standard fallback for errors/exceptions during generation
         return AnswerResponse(
-            answer="Error occurred during answer generation. Please try again.",
+            answer=REFUSAL_ANSWER,
             sources=[],
             confidence=0.0,
-            used_context=False
+            used_context=False,
+            degraded=True,
         )

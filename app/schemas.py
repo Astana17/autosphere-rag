@@ -32,3 +32,7 @@ class AnswerResponse(BaseModel):
     sources: List[SourceReference] = Field(default_factory=list, description="References to the chunks used for grounding.")
     confidence: float = Field(..., ge=0.0, le=1.0, description="Estimated confidence score in range [0, 1].")
     used_context: bool = Field(..., description="True if answer was drawn from context, False if system fell back/refused.")
+    degraded: bool = Field(
+        False,
+        description="True when the service could not complete the normal path and returned a safe fallback.",
+    )

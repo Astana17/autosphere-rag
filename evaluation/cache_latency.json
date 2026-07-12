@@ -1,0 +1,8 @@
+{
+  "n_questions": 50,
+  "without_cache_p50_ms": 9.24,
+  "without_cache_p95_ms": 11.24,
+  "with_cache_p50_ms": 0.02,
+  "with_cache_p95_ms": 0.02,
+  "speedup_p95": 639.32
+}

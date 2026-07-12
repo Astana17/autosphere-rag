@@ -60,6 +60,7 @@ ipython_config.py
 .env.local
 .env.shared
 .env.*
+!.env.example
 venv/
 ENV/
 env/
