@@ -81,7 +81,7 @@ async def answer(question: str, retrieved_chunks: List[Chunk]) -> AnswerResponse
     Connects to the configured provider (Ollama or OpenAI) or falls back to mock responses.
     """
     provider = os.getenv("LLM_PROVIDER", "ollama").lower()
-    model_name = os.getenv("LLM_MODEL_NAME", "llama3.2:3b")
+    model_name = os.getenv("LLM_MODEL_NAME", "gemma4")
     base_url = os.getenv("LLM_BASE_URL", "http://localhost:11434")
     api_key = os.getenv("LLM_API_KEY", "")
 

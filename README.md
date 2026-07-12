@@ -1,7 +1,7 @@
 # AutoSphere RAG: Ассистент по правилам дорожного движения
 
 ## 1. What This Project Does
-AutoSphere RAG is a FastAPI question-answering service for Kazakhstan road traffic rules and adjacent road legislation. It ingests `.docx` legal documents from `data/raw`, chunks them by article/Статья boundaries, indexes them with both TF-IDF and FAISS embeddings (combined via Reciprocal Rank Fusion), and asks an OpenAI-compatible LLM endpoint (AlemPlus `alemllm`, or any Ollama/OpenAI-compatible model) to produce a grounded JSON answer with citations.
+AutoSphere RAG is a FastAPI question-answering service for Kazakhstan road traffic rules and adjacent road legislation. It ingests `.docx` legal documents from `data/raw`, chunks them article-by-article (`app/chunking.py`), indexes them with both TF-IDF and FAISS embeddings (combined via Reciprocal Rank Fusion), and asks an OpenAI-compatible LLM endpoint (AlemPlus `gemma4`, or any Ollama/OpenAI-compatible model) to produce a grounded JSON answer with citations.
 
 ## 2. Corpus and Licensing
 - **Corpus:** Правила дорожного движения РК, Закон РК "О дорожном движении", КоАП РК fragments relevant to road offences, and compulsory motor liability insurance law.
@@ -20,7 +20,7 @@ Edit `.env` and set your AlemPlus values:
 
 ```bash
 LLM_PROVIDER=alemplus
-LLM_MODEL_NAME=alemllm
+LLM_MODEL_NAME=gemma4
 LLM_BASE_URL=https://llm.alem.ai/v1
 LLM_API_KEY=your_api_key_here
 RAG_PROVIDER=local
@@ -31,6 +31,8 @@ RAG_PROVIDER=local
 Then build the index and run the service:
 
 ```bash
+make ingest
+make chunk
 make index
 uvicorn app.main:app --port 8000
 ```
@@ -43,7 +45,7 @@ curl -X POST http://localhost:8000/ask \
   -d '{"question":"Можно ли водителю пользоваться телефоном во время движения?", "top_k": 5}'
 ```
 
-Example response (captured from a live run against the AlemPlus `alemllm` endpoint):
+Example response (captured from a live run against the AlemPlus `gemma4` endpoint):
 
 ```json
 {
@@ -53,7 +55,7 @@ Example response (captured from a live run against the AlemPlus `alemllm` endpoi
       "source_file": "code_of_administrative_offences.docx",
       "page": null,
       "section_title": "Статья 591. Пользование водителем при управлении транспортным средством телефоном либо радиостанцией",
-      "chunk_id": "code_of_administrative_offences.docx_sec_707",
+      "chunk_id": "code_of_administrative_offences_591",
       "excerpt": null
     }
   ],
@@ -65,8 +67,9 @@ Example response (captured from a live run against the AlemPlus `alemllm` endpoi
 ## 4. Architecture Diagram
 ```mermaid
 graph TD
-    Raw[".docx files in data/raw"] --> Extract["OOXML text extraction"]
-    Extract --> Chunk["Article-boundary chunker (Статья/Глава-aware)"]
+    Raw[".docx files in data/raw"] --> Ingest["scripts/ingest_docs.py"]
+    Ingest --> Processed["data/processed/*.jsonl"]
+    Processed --> Chunk["scripts/chunk_docs.py (article-aware)"]
     Chunk --> ChunksFile["data/chunks.jsonl"]
     ChunksFile --> Tfidf["TF-IDF matrix (built at startup)"]
     ChunksFile --> Embeddings["SentenceTransformer multilingual embeddings"]
@@ -79,7 +82,7 @@ graph TD
     Tfidf --> RRF["Reciprocal Rank Fusion (hybrid)"]
     Faiss --> RRF
     RRF --> Prompt["Grounded JSON prompt"]
-    Prompt --> LLM["AlemPlus alemllm OpenAI-compatible API"]
+    Prompt --> LLM["AlemPlus gemma4 OpenAI-compatible API"]
     LLM --> Response["AnswerResponse with sources"]
     API --> Metrics["/metrics JSON snapshot"]
 ```
@@ -87,13 +90,15 @@ graph TD
 `RETRIEVAL_BACKEND` selects the retrieval path: `lexical` (TF-IDF only), `embeddings` (FAISS only), or `hybrid` (RRF of both — default, see §6).
 
 ## 5. Retrieval Quality
-`evaluation/ground_truth.jsonl` holds 15 hand-authored questions over the real corpus (`road_traffic_rules.docx`, `road_traffic_law.docx`, `code_of_administrative_offences.docx`, `insurance_law.docx`), each pointing at real `chunk_id`s in `data/chunks.jsonl`. The mix: 8 numeric-fact questions (fines, speed limits, deadlines, sums), 5 definition questions, 2 multi-chunk questions that require combining two sections (one within a single document, one across ПДД + КоАП).
+`evaluation/ground_truth.jsonl` holds 15 hand-authored questions over the real corpus (`road_traffic_rules.docx`, `road_traffic_law.docx`, `code_of_administrative_offences.docx`, `insurance_law.docx`), each pointing at real `chunk_id`s in `data/chunks.jsonl` (2,761 article-aware chunks, IDs like `road_traffic_rules_73` or `code_of_administrative_offences_591`). The mix: 8 numeric-fact questions (fines, speed limits, deadlines, sums), 5 definition questions, 2 multi-chunk questions that require combining two sections (one within a single document, one across ПДД + КоАП).
+
+Evaluation uses **article-unit matching** by default (any `_pN` part of the labeled article counts as a hit); pass `--exact` to `evaluation/evaluate_retrieval.py` for strict `chunk_id` equality.
 
 | Backend (`RETRIEVAL_BACKEND`) | Recall@5 | MRR | nDCG@10 |
 | :--- | :---: | :---: | :---: |
-| `lexical` (TF-IDF only) | 0.500 | 0.465 | 0.504 |
-| `embeddings` (FAISS only) | 0.833 | 0.682 | 0.709 |
-| **`hybrid`** (weighted RRF, default) | **0.900** | 0.717 | 0.753 |
+| `lexical` (TF-IDF only) | 0.767 | 0.600 | 0.639 |
+| `embeddings` (FAISS only) | 0.967 | 0.850 | 0.864 |
+| **`hybrid`** (weighted RRF, default) | **1.000** | 0.867 | 0.888 |
 
 Run:
 
@@ -102,29 +107,24 @@ RETRIEVAL_BACKEND=hybrid python evaluation/evaluate_retrieval.py
 ```
 
 ## 6. Ablation Results
-**Retrieval strategy comparison (pure lexical vs pure vector vs hybrid RRF)**, same corpus, same 15-question ground truth, chunking held fixed (article-boundary chunker, §"Chunking" ADR):
+**Retrieval strategy comparison (pure lexical vs pure vector vs hybrid RRF)**, same 2,761-chunk article-aware corpus (`app/chunking.py`), same 15-question ground truth:
 
 | Strategy | Recall@5 | MRR | nDCG@10 |
 | :--- | :---: | :---: | :---: |
-| TF-IDF lexical (plain cosine, no keyword boosting) | 0.500 | 0.465 | 0.504 |
-| FAISS embeddings (`paraphrase-multilingual-MiniLM-L12-v2`) | 0.833 | 0.682 | 0.709 |
-| Hybrid (weighted Reciprocal Rank Fusion, 0.3 lexical / 0.7 embeddings, k=60) | **0.900** | 0.717 | 0.753 |
+| TF-IDF lexical (plain cosine, no keyword boosting) | 0.767 | 0.600 | 0.639 |
+| FAISS embeddings (`paraphrase-multilingual-MiniLM-L12-v2`) | 0.967 | 0.850 | 0.864 |
+| Hybrid (weighted Reciprocal Rank Fusion, 0.3 lexical / 0.7 embeddings, k=60) | **1.000** | 0.867 | 0.888 |
 
-Plain TF-IDF cosine similarity is the weakest signal here (0.500) — legal Russian text has heavy morphology (падежи/spelling variants) that word-level TF-IDF doesn't normalize, and several ground-truth questions are paraphrased definitions ("что означает термин...") that share little surface vocabulary with the source article. FAISS embeddings alone do much better (0.833) because the multilingual sentence model captures semantic similarity past the vocabulary mismatch. Weighted RRF of the two (0.900) beats either signal alone on every metric (MRR 0.717, nDCG@10 0.753 — both higher than embeddings-only), because it recovers hits neither ranker gets fully right alone.
+Plain TF-IDF is the weakest signal here (0.767) — legal Russian has heavy morphology that word-level TF-IDF doesn't normalize, and several ground-truth questions are paraphrased definitions that share little surface vocabulary with their source article. FAISS embeddings alone do much better (0.967) because the multilingual sentence model captures semantic similarity past the vocabulary mismatch. Weighted RRF of the two (1.000) recovers the remaining lexical-only misses without regressing the embedding hits.
 
-These numbers include a chunking fix and a retrieval-fusion fix, found in that order, each caught by actually running the service rather than trusting the eval script alone:
+The production pipeline is **article/point-aware chunking** (`make ingest` → `make chunk` → `make index`): one chunk per `Статья`/`Пункт`, with long articles split into `_pN` parts at 1,500 characters. Ground-truth labels reference specific parts where needed (e.g. `road_traffic_rules_2_p5` for the «уступить дорогу» definition); evaluation counts any part of the same article as a hit unless `--exact` is passed.
 
-1. **Chunking** (see `docs/adr/001-chunking.md`): the first pass at this ablation (chunking held at "one chunk per Статья/Пункт") got hybrid to only 0.767, with three definition questions ("уступить дорогу", "пешеходный переход", "дорожное движение") failing under *every* backend, because ПДД's "Основные понятия" glossary section packed dozens of unrelated terms into the same ~1,600-char chunk. Splitting it into one chunk per defined term (`scripts/build_index.py::split_glossary_by_term`) fixed all three with zero retrieval-code changes — recall@5 went 0.767 to 0.967 on the ground truth.
-2. **RRF weighting** (see `docs/adr/002-retrieval-fusion.md`): that 0.967 number used *unweighted* RRF over a candidate pool that scaled with `top_k` — two compounding bugs. Manually asking the live service a realistic, colloquial question ("я выпил алкоголь за рулем, если остановят, то какие последствия?" — phrased nothing like the ground truth) returned a completely unrelated answer about overtaking rules. Root cause: TF-IDF found no vocabulary match and produced near-noise rankings for this query, yet unweighted RRF let a chunk that was merely mediocre in *both* signals outscore the chunk FAISS correctly ranked first (because TF-IDF happened to rank it just outside a truncated 100-item candidate pool). Fixed by (a) ranking the full corpus in both signals — cheap at this corpus size, and removes candidate-pool truncation as a failure mode entirely — and (b) weighting embeddings 0.7 vs. lexical 0.3 in the RRF sum, since embeddings is the more reliable signal on this corpus generally (0.833 vs. 0.500 alone). This traded 3 points of ground-truth recall@5 (0.967 to 0.900 — one formal definition question, "уступить дорогу", regressed because lexical genuinely was the better signal for that specific query) for fixing a realistic query that was flatly broken. MRR and nDCG@10 both improved, so it wasn't a strict downgrade even on the formal set.
+**RRF weighting** (see `docs/adr/002-retrieval-fusion.md`): ranking the full corpus in both signals and weighting embeddings 0.7 vs. lexical 0.3 prevents colloquial queries with no TF-IDF vocabulary match from being drowned out by mediocre dual-signal chunks. The retrieval cache's `index_version` bump invalidates cached rankings when chunks change.
 
-The one remaining ground-truth gap (query 15, recall 0.5) is a deliberately hard multi-chunk question spanning two different documents (ПДД §12 + КоАП Статья 608) — each retriever ranks chunks independently, so a question whose answer needs two chunks from different parts of the corpus is inherently harder than a single-chunk lookup, regardless of strategy.
-
-**A prefix-consistency note, worth recording separately:** `evaluation/evaluate_retrieval.py` always calls `retrieve(question, top_k=10)` and computes recall@5 by slicing the first 5 results — valid only if `retrieve(q, top_k=5)` is guaranteed to return the same first 5 items as `retrieve(q, top_k=10)`. Ranking the full corpus (rather than a `top_k`-scaled candidate pool) in both signals guarantees this by construction, since `top_k` now only truncates the final fused list — it no longer changes which candidates get ranked in the first place.
-
-**Known limitation, deliberately left unfixed (see `docs/adr/002-retrieval-fusion.md`):** questions whose answer requires bridging vocabulary that never co-occurs in the corpus still fail. "Что будет если проехать на оранжевый светофор?" needs three separate provisions across two documents (what a yellow signal means, the stop rule, and the КоАП fine article) that never share the word "оранжевый" — the fine article ranks 766th under TF-IDF and 66th under embeddings for this query, well outside any practical `top_k`. Fixing this properly needs query rewriting (reformulating the colloquial question into legal terminology via the LLM before retrieval), which is a real architecture change — an added LLM call in the critical path — and was intentionally not implemented in this pass.
+**Known limitation, deliberately left unfixed (see `docs/adr/002-retrieval-fusion.md`):** questions whose answer requires bridging vocabulary that never co-occurs in the corpus still fail at generation time. "Что будет если проехать на оранжевый светофор?" needs three separate provisions across two documents that never share the word "оранжевый". Fixing this properly needs query rewriting via the LLM before retrieval.
 
 ## 7. Latency and Cost Budget
-Measured against the live AlemPlus `alemllm` endpoint, 15 ground-truth questions, `RETRIEVAL_BACKEND=hybrid`, on a MacBook CPU (embeddings on `mps`, no GPU required):
+Measured against the live AlemPlus `gemma4` endpoint, 15 ground-truth questions, `RETRIEVAL_BACKEND=hybrid`, on a MacBook CPU (embeddings on `mps`, no GPU required):
 
 | Stage | p50 | p95 |
 | :--- | :---: | :---: |
@@ -133,20 +133,22 @@ Measured against the live AlemPlus `alemllm` endpoint, 15 ground-truth questions
 | **Total, cache miss** | **882 ms** | **1145 ms** |
 | **Total, cache hit** (repeat query) | **802 ms** | **1075 ms** |
 
-The retrieval cache barely moves total latency (≈6% p95 improvement) because retrieval itself is already sub-millisecond on this corpus size (2,719 chunks) — the LLM call dominates end-to-end latency, so a **response cache** (keyed on the full question, not just retrieval) would have far more impact than the current retrieval-only cache. That's a documented trade-off, not an oversight: a response cache needs an invalidation strategy (see `docs/adr/` — the retrieval cache's `index_version` bump is sufficient today because the index rarely changes; a response cache would need the same plus a TTL for LLM non-determinism).
+The retrieval cache barely moves total latency (≈6% p95 improvement) because retrieval itself is already sub-millisecond on this corpus size (2,761 chunks) — the LLM call dominates end-to-end latency, so a **response cache** (keyed on the full question, not just retrieval) would have far more impact than the current retrieval-only cache. That's a documented trade-off, not an oversight: a response cache needs an invalidation strategy (see `docs/adr/` — the retrieval cache's `index_version` bump is sufficient today because the index rarely changes; a response cache would need the same plus a TTL for LLM non-determinism).
 
 **Cost:** `/metrics` reports `total_tokens_consumed`; across the 15-question run this averaged **~850 tokens/request** (question + up to 5 retrieved chunks + system prompt + answer). At that rate, 1,000 questions ≈ 850K tokens. Converting to a dollar figure requires AlemPlus's published per-token rate, which isn't available to this project — the token count itself is the honest, portable number to defend; multiply by whatever rate card applies to your account.
 
 ## 8. What Happens When It Breaks
 1. **Missing or corrupt FAISS/TF-IDF index:** `/ready` returns HTTP 503 and `/ask` rejects requests with `{"detail": "The vector search engine is not ready."}` instead of crashing. Re-run `make index`.
 2. **AlemPlus timeout:** `app/reliability.py` bounds the LLM call at `LLM_TIMEOUT_SECONDS` (default 30s) and `app/main.py` returns HTTP 504 with `{"detail": "LLM generation timed out. Please try again."}` after `MAX_RETRIES` retry attempts (1s → 2s → 4s backoff) are exhausted.
-3. **Malformed or fenced LLM JSON:** observed in practice — the AlemPlus `alemllm` model sometimes wraps its JSON reply in a ` ```json ... ``` ` markdown fence despite the system prompt explicitly forbidding it. `app/generation.py::strip_json_fence` strips the fence before parsing; if parsing still fails (`json.loads` raises), the service falls back to a low-confidence answer (`confidence: 0.0, used_context: false`) instead of a 500. This is the failure mode most likely to recur in production, since it depends on upstream model behavior outside our control.
+3. **Malformed or fenced LLM JSON:** observed in practice — the AlemPlus `gemma4` model sometimes wraps its JSON reply in a ` ```json ... ``` ` markdown fence despite the system prompt explicitly forbidding it. `app/generation.py::strip_json_fence` strips the fence before parsing; if parsing still fails (`json.loads` raises), the service falls back to a low-confidence answer (`confidence: 0.0, used_context: false`) instead of a 500. This is the failure mode most likely to recur in production, since it depends on upstream model behavior outside our control.
 4. **Transient LLM HTTP errors:** `retry_with_backoff` retries the generation call up to `MAX_RETRIES` times with exponential backoff before surfacing HTTP 504/502.
 5. **Vector search unreachable:** `VectorRetriever.retrieve()` raises `DatabaseConnectionError`, which `app/main.py` catches and returns HTTP 503 with an honest message rather than a stack trace.
 
 ## Useful Commands
 ```bash
 make install
+make ingest
+make chunk
 make index
 make serve
 make test

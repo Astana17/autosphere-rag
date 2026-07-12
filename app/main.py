@@ -627,7 +627,7 @@ async def ask(request_payload: AskRequest):
                     "question": request_payload.question,
                     "retrieved_chunk_ids": [c.chunk_id for c in retrieved_chunks],
                     "prompt_version": PROMPT_VERSION,
-                    "model_name": os.getenv("LLM_MODEL_NAME", "alemplus-gemma4"),
+                    "model_name": os.getenv("LLM_MODEL_NAME", "gemma4"),
                     "latency_ms_by_stage": stage_latencies,
                     "total_latency_ms": total_latency_ms,
                     "token_usage": tokens_used,
