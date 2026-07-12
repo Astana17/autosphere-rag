@@ -36,7 +36,8 @@ class VectorRetriever:
         try:
             logger.info("Initializing embedding model...")
             if SentenceTransformer is not None:
-                self.model = SentenceTransformer(self.model_name)
+                device = os.getenv("EMBEDDING_DEVICE", "cpu")
+                self.model = SentenceTransformer(self.model_name, device=device)
             else:
                 logger.warning("SentenceTransformer is not installed; running in mock mode.")
             

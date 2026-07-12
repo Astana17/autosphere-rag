@@ -81,24 +81,36 @@ graph TD
 ```
 
 ## 5. Retrieval Quality
-The pipeline has been evaluated on a manually-labeled ground-truth set of 15 questions.
+The pipeline has been evaluated on a manually-labeled ground-truth set of 15 questions
+(`evaluation/ground_truth.jsonl`). Ablation scores below use **article-unit matching**
+(so recursive chunk IDs remain comparable to article-aware labels). Exact `chunk_id`
+matching via `evaluation/evaluate_retrieval.py` on the production article index scores
+**Recall@5 = 0.70 / MRR = 0.66 / nDCG@10 = 0.65**.
 
 | Model / Configuration | Chunk Strategy | Recall@5 | MRR | nDCG@10 |
 | :--- | :--- | :---: | :---: | :---: |
-| *Baseline* (MiniLM, 500 char) | Recursive Splitter | 0.73 | 0.76 | 0.74 |
-| **Current Production** | Section-Boundary Splitter | **0.87** | **0.91** | **0.89** |
+| Recursive baseline (MiniLM, size=800) | Recursive splitter | 0.83 | 0.71 | 0.76 |
+| **Current production** (MiniLM) | **Article/point-aware** | **0.97** | **0.85** | **0.86** |
 
-*Target boundary:* `recall@5 >= 0.75` (Production hits **0.87**).
+*Target boundary:* `recall@5 >= 0.75` on the labeled set (article-aware unit match hits **0.97**).
 
 ## 6. Ablation Results
-*An ablation sweep comparing different configurations:*
+Chunk-size / strategy sweep with fixed embedding model
+`paraphrase-multilingual-MiniLM-L12-v2`. Reproduce with `make ablation`
+(writes `evaluation/ablation_results.json`).
 
-| Parameter Sweep | Details | Recall@5 | Latency (p95) |
-| :--- | :--- | :---: | :---: |
-| Chunk Size = 200 chars | Too small, cuts sentences | 0.61 | 120ms |
-| Chunk Size = 400 chars | Good balance | 0.79 | 128ms |
-| Chunk Size = 800 chars | Includes full contexts (Optimum) | **0.87** | 135ms |
-| Chunk Size = 1600 chars | High noise, redundant text | 0.82 | 148ms |
+| Config | Details | Recall@5 | MRR | nDCG@10 | Latency p95 |
+| :--- | :--- | :---: | :---: | :---: | :---: |
+| recursive_200 | Recursive splitter, chunk_size=200 | 0.67 | 0.62 | 0.64 | 14ms |
+| recursive_400 | Recursive splitter, chunk_size=400 | 0.83 | 0.74 | 0.76 | 13ms |
+| recursive_800 | Recursive splitter, chunk_size=800 | 0.83 | 0.71 | 0.76 | 13ms |
+| recursive_1600 | Recursive splitter, chunk_size=1600 | 0.73 | 0.64 | 0.67 | 31ms |
+| **article_aware** | **Article/point-aware, max_chars=1500** | **0.97** | **0.85** | **0.86** | **13ms** |
+
+**Takeaway:** Article/point-aware chunking wins (Recall@5 **0.97**) because the corpus and
+ground-truth labels are already organized as `Статья`/`Пункт` units. Fixed-size recursive
+chunks peak at 400–800 chars (0.83); 200-char slices cut definitions mid-sentence (0.67),
+while 1600-char windows mix unrelated articles and dilute the embedding (0.73).
 
 ## 7. Latency and Cost Budget
 - **Latency Performance (without cache):**

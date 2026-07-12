@@ -76,5 +76,6 @@ data/chunks.jsonl
 data/chunks_*.jsonl
 data/index/*
 !data/index/.gitkeep
+data/ablation/
 evaluation/results/*
 !evaluation/results/.gitkeep

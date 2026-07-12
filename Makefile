@@ -1,4 +1,4 @@
-.PHONY: install index chunk ingest serve test clean help
+.PHONY: install index chunk ingest serve test ablation clean help
 
 VENV = venv
 PYTHON = $(VENV)/bin/python
@@ -12,6 +12,7 @@ help:
 	@echo "  make index    - Embed chunks and build FAISS index"
 	@echo "  make serve    - Start the FastAPI web service"
 	@echo "  make test     - Run unit tests with pytest"
+	@echo "  make ablation - Chunk-size / strategy ablation -> evaluation/ablation_results.json"
 	@echo "  make clean    - Remove virtual environment and temporary files"
 
 install:
@@ -33,6 +34,9 @@ serve:
 
 test:
 	$(PYTHON) -m pytest tests/
+
+ablation:
+	EMBEDDING_DEVICE=cpu TOKENIZERS_PARALLELISM=false $(PYTHON) evaluation/run_ablation.py
 
 clean:
 	rm -rf $(VENV)

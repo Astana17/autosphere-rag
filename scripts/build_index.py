@@ -98,42 +98,58 @@ def compute_embeddings_with_cache(
     chunks: List[Dict[str, Any]],
     model_name: str,
     cache_dir: str,
+    batch_size: int = 64,
 ) -> np.ndarray:
     cache_path = os.path.join(cache_dir, "cache.json")
     cache = load_embedding_cache(cache_path)
 
     print("Loading embedding model for index creation...")
-    model = SentenceTransformer(model_name) if SentenceTransformer is not None else None
+    device = os.getenv("EMBEDDING_DEVICE", "cpu")
+    if SentenceTransformer is not None:
+        model = SentenceTransformer(model_name, device=device)
+    else:
+        model = None
     if model is None:
         print("Mock Mode: SentenceTransformer not available. Generating random vectors.")
 
-    embeddings: List[List[float]] = []
-    cache_updated = False
-
-    for idx, chunk in enumerate(chunks):
+    hashes: List[str] = []
+    texts: List[str] = []
+    for chunk in chunks:
         chunk_text = chunk["text"]
         raw_key = f"{chunk_text}||{model_name}||{PREPROCESSING_VERSION}"
         chunk_hash = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+        hashes.append(chunk_hash)
+        texts.append(chunk_text)
 
-        if chunk_hash in cache:
-            embeddings.append(cache[chunk_hash])
+    missing_indices = [i for i, h in enumerate(hashes) if h not in cache]
+    print(
+        f"Embedding cache: {len(hashes) - len(missing_indices)} hits, "
+        f"{len(missing_indices)} misses (device={device})"
+    )
+
+    if missing_indices:
+        if model is not None:
+            missing_texts = [texts[i] for i in missing_indices]
+            for start in range(0, len(missing_texts), batch_size):
+                batch = missing_texts[start : start + batch_size]
+                vectors = model.encode(batch, show_progress_bar=False, convert_to_numpy=True)
+                for offset, vector in enumerate(vectors):
+                    cache[hashes[missing_indices[start + offset]]] = vector.tolist()
+                done = min(start + batch_size, len(missing_texts))
+                if done % (batch_size * 5) == 0 or done == len(missing_texts):
+                    print(f"Computed embeddings for {done}/{len(missing_texts)} new chunks...")
+                # Checkpoint large caches so a crash does not lose the whole run.
+                if done % (batch_size * 20) == 0:
+                    save_embedding_cache(cache, cache_path)
         else:
-            if model is not None:
-                vector = model.encode([chunk_text])[0].tolist()
-            else:
-                vector = np.random.randn(384).tolist()
-            cache[chunk_hash] = vector
-            embeddings.append(vector)
-            cache_updated = True
+            for idx in missing_indices:
+                cache[hashes[idx]] = np.random.randn(384).tolist()
 
-        if (idx + 1) % 100 == 0:
-            print(f"Computed embeddings for {idx + 1}/{len(chunks)} chunks...")
-
-    if cache_updated:
         save_embedding_cache(cache, cache_path)
         print("Saved updated embedding cache to disk.")
 
-    return np.array(embeddings, dtype=np.float32)
+    embeddings = np.array([cache[h] for h in hashes], dtype=np.float32)
+    return embeddings
 
 
 def build_faiss_index(embeddings: np.ndarray, index_dir: str) -> None:

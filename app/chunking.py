@@ -117,6 +117,43 @@ def group_records_by_document(
     return grouped
 
 
+def _concat_document_with_spans(
+    doc_records: Sequence[Dict[str, Any]],
+) -> tuple[str, List[tuple[int, int, str]]]:
+    """Concatenate article texts and return (full_text, [(start, end, article_id), ...])."""
+    pieces: List[str] = []
+    spans: List[tuple[int, int, str]] = []
+    cursor = 0
+    for rec in doc_records:
+        text = (rec.get("text") or "").strip()
+        if not text:
+            continue
+        if pieces:
+            cursor += 2  # account for "\n\n" joiner
+        start = cursor
+        end = cursor + len(text)
+        article_id = rec.get("article_id") or _slug(
+            f"{rec.get('document_id', 'doc')}_{rec.get('article', 'unit')}"
+        )
+        spans.append((start, end, article_id))
+        pieces.append(text)
+        cursor = end
+    return "\n\n".join(pieces), spans
+
+
+def _covered_article_ids(
+    char_start: int,
+    char_end: int,
+    spans: Sequence[tuple[int, int, str]],
+) -> List[str]:
+    """Article IDs whose text overlaps the [char_start, char_end) window."""
+    covered: List[str] = []
+    for start, end, article_id in spans:
+        if start < char_end and end > char_start:
+            covered.append(article_id)
+    return covered
+
+
 def chunk_recursive(
     records: Sequence[Dict[str, Any]],
     chunk_size: int = DEFAULT_CHUNK_SIZE,
@@ -125,9 +162,7 @@ def chunk_recursive(
     """Baseline: concatenate each document, then recursively split by size."""
     chunks: List[Dict[str, Any]] = []
     for document_id, doc_records in group_records_by_document(records).items():
-        full_text = "\n\n".join(
-            (rec.get("text") or "").strip() for rec in doc_records if (rec.get("text") or "").strip()
-        )
+        full_text, article_spans = _concat_document_with_spans(doc_records)
         if not full_text:
             continue
 
@@ -152,6 +187,7 @@ def chunk_recursive(
                     "char_end": char_end,
                     "section_title": f"{prototype.get('document_title') or document_id} [rec {idx}]",
                     "parent_article_id": None,
+                    "covered_article_ids": _covered_article_ids(char_start, char_end, article_spans),
                     "part_index": idx,
                     "part_count": len(parts),
                     "chunk_size": chunk_size,

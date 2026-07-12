@@ -90,6 +90,10 @@ def test_recursive_chunking_baseline():
     # Both documents should appear.
     docs = {c["document_id"] for c in chunks}
     assert docs == {"road_traffic_law", "road_traffic_rules"}
+    # Char-span metadata must map back to source article units for ablation scoring.
+    covered = {aid for c in chunks for aid in c.get("covered_article_ids", [])}
+    assert "road_traffic_law_1" in covered
+    assert "road_traffic_rules_84" in covered
 
 
 def test_run_chunking_dispatch_and_summary():
