@@ -3,6 +3,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from app.generation import answer, SYSTEM_PROMPT, PROMPT_VERSION, REFUSAL_ANSWER, build_user_prompt
 from app.schemas import Chunk, AnswerResponse
 
+
+@pytest.fixture(autouse=True)
+def llm_test_env(monkeypatch):
+    """Unit tests mock the Ollama HTTP shape; keep them independent of .env."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_MODEL_NAME", "llama3.2:3b")
+    monkeypatch.setenv("LLM_BASE_URL", "http://localhost:11434")
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+
+
 mock_chunks = [
     Chunk(
         chunk_id="road_traffic_rules_73",

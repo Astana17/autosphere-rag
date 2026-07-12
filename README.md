@@ -9,6 +9,14 @@ FastAPI service that returns grounded JSON with source citations. The serving pa
 includes a retrieval cache, LLM timeouts + exponential retries, graceful
 degradation, structured JSON logs with `request_id`, and a `/metrics` snapshot.
 
+**TL;DR** (after first-time index build):
+
+```bash
+make install && source venv/bin/activate && cp .env.example .env
+make chunk && make index          # once
+make serve                        # http://localhost:8000
+```
+
 ## 2. Corpus and Licensing
 
 | Document | File | Source |
@@ -23,27 +31,130 @@ Kazakhstan published on the official legal information portal `adilet.zan.kz`.
 They are used here for non-commercial educational / prototype purposes. No private
 or paid corpora are included.
 
-## 3. Quickstart
+## 3. How to Run
 
-Prerequisites: Python 3.10+, and for generation a local [Ollama](https://ollama.com)
-model (default `llama3.2:3b`) **or** an OpenAI-compatible API key.
+### Prerequisites
+
+- **Python 3.10+** (3.11 or 3.12 recommended; the repo includes a `venv/` you can reuse)
+- **An LLM backend** for answer generation — pick one:
+  - **Alem+ `gemma4`** (recommended): OpenAI-compatible API at `https://llm.alem.ai/v1`
+  - **Local Ollama** (free): [Ollama](https://ollama.com) with model `llama3.2:3b`
+  - **Other OpenAI-compatible APIs**: OpenAI, etc.
+- **~2 GB disk** for the embedding model cache and FAISS index (first `make index` run downloads the Sentence-BERT model)
+
+### First-time setup
+
+From the project root:
 
 ```bash
-# 1. Environment
-python -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env   # edit LLM_* if needed
+# 1. Install dependencies (creates venv/ if missing)
+make install
+source venv/bin/activate
 
-# 2. Build index (ingest → chunk → embed → FAISS); uses disk embedding cache
-make ingest && make chunk && make index
-# or simply: make index   # will chunk from processed JSONL if chunks missing
+# 2. Configure environment
+cp .env.example .env
+# Edit .env — at minimum set LLM_PROVIDER, LLM_MODEL_NAME, LLM_BASE_URL, and LLM_API_KEY if not using Ollama
 
-# 3. Serve (ensure Ollama is running: `ollama serve` + `ollama pull llama3.2:3b`)
-uvicorn app.main:app --port 8000
-# or: make serve
+# 3. Build the search index (required before the API can answer questions)
+make chunk    # article-aware chunks → data/chunks.jsonl
+make index    # embed + FAISS → data/index/index.faiss
 ```
 
-Startup to `/ready == 200` should be under ~30s when the index is already on disk.
+`data/processed/*.jsonl` is already checked in, so you can skip `make ingest` unless you replace the raw DOCX files under `data/raw/`. Running `make index` alone also works — it chunks from processed JSONL automatically when `data/chunks.jsonl` is missing.
+
+The first `make index` downloads `paraphrase-multilingual-MiniLM-L12-v2` and may take a few minutes.
+
+### Configure the LLM
+
+**Option A — Alem+ gemma4 (recommended)**
+
+Set these in `.env`:
+
+```bash
+LLM_PROVIDER=alemplus
+LLM_MODEL_NAME=gemma4
+LLM_BASE_URL=https://llm.alem.ai/v1
+LLM_API_KEY=your-api-key-here
+```
+
+No local LLM process needed — the API calls Alem+ over HTTPS when you hit `/ask`.
+The app posts to `https://llm.alem.ai/v1/chat/completions` with
+`Authorization: Bearer <LLM_API_KEY>` (same as the Alem+ dashboard example).
+
+**Option B — Local Ollama**
+
+```bash
+ollama serve                  # if not already running
+ollama pull llama3.2:3b
+```
+
+Ensure `.env` contains:
+
+```bash
+LLM_PROVIDER=ollama
+LLM_MODEL_NAME=llama3.2:3b
+LLM_BASE_URL=http://localhost:11434
+```
+
+**Option C — Other OpenAI-compatible API**
+
+```bash
+LLM_PROVIDER=openai
+LLM_MODEL_NAME=gpt-4o-mini   # must match a model your key can access
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_API_KEY=sk-...
+```
+
+A `401 key_model_access_denied` response usually means `LLM_MODEL_NAME` is not enabled for your API key — pick a model your account is scoped to.
+
+### Start the server
+
+```bash
+make serve
+# equivalent: venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+The API listens on **http://localhost:8000**. Interactive docs: **http://localhost:8000/docs**.
+
+Startup to `GET /ready == 200` should be under ~30s once `data/index/index.faiss` exists on disk.
+
+### Verify it works
+
+```bash
+# Liveness (process is up)
+curl http://localhost:8000/health
+
+# Readiness (FAISS index + embedding model loaded)
+curl http://localhost:8000/ready
+
+# Ask a question (requires a running LLM backend)
+curl -X POST http://localhost:8000/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question": "Какая максимальная скорость разрешена для движения транспортных средств в населенных пунктах?", "top_k": 5}'
+```
+
+Run the test suite (no server or LLM needed for most tests):
+
+```bash
+make test
+```
+
+Smoke-test 100 ground-truth questions against a running server:
+
+```bash
+make smoke
+```
+
+### Troubleshooting
+
+| Symptom | Likely cause | Fix |
+| :--- | :--- | :--- |
+| `/ready` returns 503 | Index not built | Run `make chunk && make index` |
+| `/ask` returns 504 `llm_timeout` | LLM too slow or unreachable | Increase `LLM_TIMEOUT_SECONDS`; check Ollama/API is running |
+| `/ask` returns 200 with `"degraded": true` and empty sources | LLM HTTP errors after retries | Verify `LLM_BASE_URL`, API key, and model name |
+| `curl: (52) Empty reply from server` on `/ask` | PyTorch embedding crash under uvicorn `--reload` | Use `make serve` (not `make serve-dev`); restart the server |
+| `ModuleNotFoundError` on startup | Dependencies not installed | `make install` and activate `venv` |
+| First query is slow | Embedding model / FAISS cold start | Normal; subsequent queries use the retrieval cache |
 
 ### Sample query
 
@@ -202,7 +313,8 @@ Failed / timeout path:
 | :--- | :--- |
 | `make install` | Create venv + install deps |
 | `make ingest` / `chunk` / `index` | Offline pipeline |
-| `make serve` | uvicorn on :8000 |
+| `make serve` | uvicorn on :8000 (stable; use this) |
+| `make serve-dev` | uvicorn with `--reload` (dev only; `/ask` may fail) |
 | `make test` | pytest |
 | `make ablation` | Chunk-size / strategy sweep |
 | `make measure-cache` | Retrieval-cache p50/p95 → `evaluation/cache_latency.json` |

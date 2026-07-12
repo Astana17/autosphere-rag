@@ -1,3 +1,4 @@
+import asyncio
 import time
 import uuid
 import os
@@ -148,10 +149,12 @@ async def ask(request_payload: AskRequest):
 
     try:
         t_start_retrieval = time.time()
-        retrieved_chunks, cache_hit, top_score = retriever.retrieve(
-            query=request_payload.question,
-            top_k=request_payload.top_k or 5,
-            filters=request_payload.filters,
+        retrieved_chunks, cache_hit, top_score = await asyncio.to_thread(
+            retriever.retrieve,
+            request_payload.question,
+            request_payload.top_k or 5,
+            "v1",
+            request_payload.filters,
         )
         stage_latencies["embedding_ms"] = round(retriever.last_embed_ms, 2)
         stage_latencies["retrieval_ms"] = round((time.time() - t_start_retrieval) * 1000.0, 2)
