@@ -9,7 +9,7 @@
 Neither retrieval signal alone is good enough on this corpus: TF-IDF lexical search scores recall@5 = 0.500 on the 15-question ground truth, FAISS embeddings score 0.833 (both below or near the 0.75 target). The two fail on different kinds of questions — TF-IDF struggles with paraphrased/colloquial questions that don't share legal vocabulary with the source article; embeddings occasionally rank a semantically-close-but-wrong chunk over the exact one. Combining them should, in principle, recover hits either signal misses alone.
 
 ## Options Considered
-
+ 
 ### Option 1: Unweighted Reciprocal Rank Fusion over a `top_k`-scaled candidate pool
 The first implementation: for each of the two rankers, fetch a candidate list sized `max(top_k * 8, 30)`, then fuse by `score = sum(1 / (k + rank + 1))` across both lists with equal weight, and return the top `top_k` of the fused result.
 - **Pros:** simple, standard RRF, no score-scale normalization needed since it operates on rank position.

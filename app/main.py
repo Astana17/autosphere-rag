@@ -434,7 +434,15 @@ async def global_exception_handler(request: Request, exc: Exception):
 def index():
     return HTMLResponse(INDEX_HTML)
 
-def fallback_from_retrieved_chunks(retrieved_chunks) -> AnswerResponse:
+def fallback_from_retrieved_chunks(retrieved_chunks, top_score: float = 0.0) -> AnswerResponse:
+    if not retrieved_chunks or top_score <= 0.0:
+        return AnswerResponse(
+            answer="I don't know from the provided context",
+            sources=[],
+            confidence=0.0,
+            used_context=False
+        )
+
     useful_chunks = [chunk for chunk in retrieved_chunks if len(chunk.text.strip()) > 80]
     if not useful_chunks:
         useful_chunks = retrieved_chunks
@@ -585,14 +593,14 @@ async def ask(request_payload: AskRequest):
         except Exception as e:
             logger.error(f"Generation stage failed: {str(e)}")
             # Graceful degradation fallback rather than crashing hard
-            response_data = fallback_from_retrieved_chunks(retrieved_chunks)
+            response_data = fallback_from_retrieved_chunks(retrieved_chunks, top_score)
 
-        if (
-            retrieved_chunks
-            and not response_data.used_context
-            and response_data.answer.strip() == "I don't know from the provided context"
-        ):
-            response_data = fallback_from_retrieved_chunks(retrieved_chunks)
+        # if (
+        #     retrieved_chunks
+        #     and not response_data.used_context
+        #     and response_data.answer.strip() == "I don't know from the provided context"
+        # ):
+        #     response_data = fallback_from_retrieved_chunks(retrieved_chunks)
 
         source_ids_with_excerpts = {source.chunk_id for source in response_data.sources if source.excerpt}
         for source in response_data.sources:
@@ -605,7 +613,7 @@ async def ask(request_payload: AskRequest):
                     break
 
         if response_data.used_context and not response_data.sources and retrieved_chunks:
-            response_data.sources = fallback_from_retrieved_chunks(retrieved_chunks).sources
+            response_data.sources = fallback_from_retrieved_chunks(retrieved_chunks, top_score).sources
 
         stage_latencies["generation_ms"] = (time.time() - t_start_generation) * 1000.0
 
